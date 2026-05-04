@@ -58,6 +58,7 @@ DEFAULT_RETRY_WAIT_MS = 800
 DEFAULT_TYPE_DELAY_MS = 10
 DEFAULT_TIMEOUT_MS = 60000
 DEFAULT_SLOW_MO_MS = 0
+RESULTS_DIR = TESTS_DIR / "results"
 
 def _configure_stdout():
     try:
@@ -407,6 +408,48 @@ def _safe_save(wb, output_path: str) -> str:
         print(f"Warning: Output file locked. Saved to {fallback}")
         return fallback
 
+
+def _generate_html_report(rows: list[dict], report_path: Path, excel_path: str | Path):
+    rows_html = []
+    for r in rows:
+        img_html = ""
+        if r.get("screenshot"):
+            img = Path(r.get("screenshot"))
+            img_src = img.name
+            img_html = f'<a href="{img_src}" target="_blank"><img src="{img_src}" style="max-width:300px;max-height:200px"/></a>'
+        rows_html.append(
+            f"<tr><td>{r['row']}</td><td>{_escape_html(r['input'])}</td><td>{_escape_html(r['expected'])}</td><td>{_escape_html(r['actual'])}</td><td>{r['status']}</td><td>{img_html}</td></tr>"
+        )
+
+    html = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Test Report</title>
+      <style>table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#f4f4f4}}</style>
+    </head>
+    <body>
+      <h1>Test Report</h1>
+      <p>Workbook: {excel_path}</p>
+      <table>
+        <thead><tr><th>Row</th><th>Input</th><th>Expected</th><th>Actual</th><th>Status</th><th>Screenshot</th></tr></thead>
+        <tbody>
+        {''.join(rows_html)}
+        </tbody>
+      </table>
+    </body>
+    </html>
+    """
+    # Write to report file located in RESULTS_DIR so image links work
+    report_path.write_text(html, encoding="utf-8")
+
+
+def _escape_html(s):
+    if s is None:
+        return ""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"))
+
 def _find_chat_locators(page, timeout_ms: int):
     deadline = time.time() + (max(1, timeout_ms) / 1000)
     last_debug = None
@@ -541,6 +584,8 @@ def run_test():
 
     rows_total = max(0, int(ws.max_row or 0) - header_row)
     print(f"Starting Frontend-Only test with {rows_total} rows...")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    report_rows: list[dict] = []
 
     with sync_playwright() as p:
         # 2. Launch Browser
@@ -655,6 +700,23 @@ def run_test():
                     status = "COLLECTED"
                 _set_cell_value(ws, row_index, status_col_idx, status)
                 print(f"  -> {status}")
+
+                # Capture screenshot for this test case
+                try:
+                    screenshot_name = f"row_{row_index}.png"
+                    screenshot_path = RESULTS_DIR / screenshot_name
+                    page.screenshot(path=str(screenshot_path), full_page=False)
+                except Exception:
+                    screenshot_name = ""
+
+                report_rows.append({
+                    "row": row_index,
+                    "input": singlish_input,
+                    "expected": expected_sinhala,
+                    "actual": actual_output,
+                    "status": status,
+                    "screenshot": screenshot_name,
+                })
                 processed += 1
                 if args.save_every and int(args.save_every) > 0 and processed % int(args.save_every) == 0:
                     args.output = _safe_save(wb, args.output)
@@ -693,7 +755,13 @@ def run_test():
         print(f"Error saving output file '{args.output}': {e}")
         return
 
-    print(f"Test completed. Results saved to {args.output}")
+    # Generate HTML report with screenshots
+    try:
+        report_file = RESULTS_DIR / "report.html"
+        _generate_html_report(report_rows, report_file, args.output)
+        print(f"Test completed. Results saved to {args.output} and report: {report_file}")
+    except Exception as e:
+        print(f"Test completed. Results saved to {args.output}. Failed to generate HTML report: {e}")
 
 if __name__ == "__main__":
     run_test()
